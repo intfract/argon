@@ -3,6 +3,7 @@ using System.Collections;
 using System.ComponentModel.DataAnnotations;
 using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
+using System.Runtime.Serialization;
 using System.Text;
 
 namespace Argon;
@@ -20,22 +21,6 @@ public class Argon
                 data = value;
             }
         }
-        private byte size = 255;
-        public byte Size
-        {
-            get => size;
-            set
-            {
-                if (0 < size && size < 255)
-                {
-                    size = value;
-                }
-                else
-                {
-                    throw new Exception("Invalid Size\nCorrect Size: 0 < ArgonType.size < 255");
-                }
-            }
-        }
 
         public new string ToString()
         {
@@ -46,16 +31,21 @@ public class Argon
     public class Processor
     {
         public bool isEmpty = false;
-        public Type? type;
         public Func<byte, byte[], byte>? callback;
+        public int noInterrupt = 0;
+
         public Processor(bool isEmpty)
         {
             this.isEmpty = isEmpty;
         }
-        public Processor(Type type, Func<byte, byte[], byte> callback)
+        public Processor(Func<byte, byte[], byte> callback)
         {
-            this.type = type;
             this.callback = callback;
+        }
+        public Processor(Func<byte, byte[], byte> callback, int noInterrupt)
+        {
+            this.callback = callback;
+            this.noInterrupt = noInterrupt;
         }
     }
 
@@ -87,15 +77,6 @@ public class Argon
     public static List<Table> Tables = new ();
     public static List<string> TableNames = new();
 
-    public static bool IsValid(dynamic value, byte size)
-    {
-        if (value.size <= size)
-        {
-            return true;
-        }
-        return false;
-    }
-
     public class Text : ArgonType
     {
         private string data = "";
@@ -105,44 +86,15 @@ public class Argon
             set
             {
                 string s = BytesToString(value);
-                if (0 < s.Length && s.Length < size)
-                {
-                    data = s;
-                }
-                else
-                {
-                    throw new Exception("Invalid Size\nCorrect Size: 0 < Text.size < 255");
-                }
-            }
-        }
-        private byte size = 255;
-        public new byte Size
-        {
-            get => size;
-            set
-            {
-                if (0 < size && size < 255)
-                {
-                    size = value;
-                } else
-                {
-                    throw new Exception("Invalid Size\nCorrect Size: 0 < Text.size < 255");
-                }
+                data = s;
             }
         }
 
         public Text() { }
 
-        public Text(string data, byte? size)
+        public Text(string data)
         {
-            Size = size ?? 255;
-            if (IsValid(data, this.size))
-            {
-                this.data = data;
-            } else
-            {
-                throw new Exception("Invalid Entry");
-            }
+            this.data = data;
         }
 
         public string GetValue()
@@ -156,7 +108,38 @@ public class Argon
         }
     }
 
-    public static Processor Next()
+    public class Integer : ArgonType
+    {
+        private int data;
+        public new byte[] Data
+        {
+            get => IntegerToBytes(data);
+            set
+            {
+                int z = BytesToInteger(value);
+                data = z;
+            }
+        }
+
+        public Integer() { }
+
+        public Integer(int data)
+        {
+            this.data = data;
+        }
+
+        public int GetValue()
+        {
+            return data;
+        }
+
+        public new string ToString()
+        {
+            return data.ToString();
+        }
+    }
+
+    public static Processor End()
     {
         return new Processor(true);
     }
@@ -168,19 +151,18 @@ public class Argon
 
     public static Processor CreateTable()
     {
-        return new Processor(typeof(Text), byte (byte id, byte[] bytes) =>
+        return new Processor(byte (byte id, byte[] bytes) =>
         {
             string tableName = BytesToString(bytes);
             Tables.Add(new Table(tableName));
             TableNames.Add(tableName);
-            // Console.WriteLine($"Created Table: {tableName}");
             return 0;
         });
     }
 
     public static Processor AddField()
     {
-        return new Processor(typeof(Text), byte (byte id, byte[] bytes) =>
+        return new Processor(byte (byte id, byte[] bytes) =>
         {
             // PrintBytes(bytes);
             if (id % 2 == 0)
@@ -190,7 +172,7 @@ public class Argon
                 {
                     Tables.Last().fieldNames.Add(fieldName);
                     // Console.WriteLine(Tables.Last().fieldNames.Last());
-                    return (byte)TypeMap.IndexOf(typeof(Text));
+                    return 0;
                 } else
                 {
                     throw new Exception("Duplicate Field Name");
@@ -202,7 +184,7 @@ public class Argon
                     byte index = (byte)(bytes[0] - CommandMap.Count);
                     Tables.Last().fieldTypes.Add(TypeMap[index]);
                     // Console.WriteLine(Tables.Last().fieldTypes.Last());
-                    return index;
+                    return 0;
                 } else
                 {
                     throw new Exception("Invalid Type Byte\nCorrect Size: 1 Byte");
@@ -213,9 +195,8 @@ public class Argon
 
     public static Processor AddRecord()
     {
-        return new Processor(typeof(Text), byte (byte id, byte[] bytes) =>
+        return new Processor(byte (byte id, byte[] bytes) =>
         {
-            // PrintBytes(bytes);
             Table table = Tables.Last();
             if (id > table.fieldNames.Count) throw new Exception("Byte Overflow");
             Type dataType = table.fieldTypes[id];
@@ -224,13 +205,58 @@ public class Argon
             // Console.WriteLine(instance.ToString());
             if (id == 0) table.CreateRecord();
             table.AddRecordValue(instance);
+            if (id + 1 < table.fieldTypes.Count)
+                if (table.fieldTypes[id + 1] == typeof(Integer)) return 4; // no interrupt for 4 bytes
             return 0;
         });
     }
 
+    public static Processor OpenFile()
+    {
+        return new Processor(byte (byte id, byte[] bytes) =>
+        {
+            string s = BytesToString(bytes);
+            ProcessBytesFrom(s);
+            return 0;
+        });
+    }
+
+    public static Processor Ignore()
+    {
+        return new Processor(byte (byte id, byte[] bytes) =>
+        {
+            if (bytes.Length > 1) throw new Exception("Invalid Ignore Byte\nCorrect Size: 1 Byte");
+            return (byte)(bytes[0] - CommandMap.Count); // more commands mean less ignorable bytes
+        });
+    }
+
+    public static List<Func<Processor>> CommandMap = new()
+    {
+        End,
+        Split,
+        CreateTable,
+        AddField,
+        AddRecord,
+        OpenFile,
+        Ignore,
+    };
+
     public static void PrintTable(Table table, byte? w)
     {
-        byte fieldWith = w ?? 16; // fixed equal column widths
+        int maxFieldWidth = table.name.Length;
+        foreach (string fieldName in table.fieldNames)
+        {
+            if (fieldName.Length > maxFieldWidth) maxFieldWidth = fieldName.Length;
+        }
+        foreach (List<dynamic> record in table.records)
+        {
+            foreach (var field in record)
+            {
+                string fieldString = field.ToString();
+                if (fieldString.Length > maxFieldWidth) maxFieldWidth = fieldString.Length;
+            }
+        }
+        int fieldWith = w ?? maxFieldWidth + 1;
         int width = table.fieldNames.Count * (fieldWith + 2) + 2;
         string divider = $"+{new string('-', width - 2)}+";
         Console.WriteLine(divider);
@@ -254,19 +280,11 @@ public class Argon
         Console.WriteLine(divider);
     }
 
-    public static List<Func<Processor>> CommandMap = new()
-    {
-        Next,
-        Split,
-        CreateTable,
-        AddField,
-        AddRecord,
-    };
-
     // Activator.CreateInstance
     public static List<Type> TypeMap = new()
     {
         typeof(Text),
+        typeof(Integer),
     };
 
     public static List<char> CharacterMap = new();
@@ -329,6 +347,17 @@ public class Argon
         return sb.ToString();
     }
 
+    public static byte[] IntegerToBytes(int z)
+    {
+        byte[] bytes = BitConverter.GetBytes(z);
+        return bytes;
+    }
+
+    public static int BytesToInteger(byte[] bytes)
+    {
+        return BitConverter.ToInt32(bytes);
+    }
+
     public static byte[] PrintBytes(byte[] bytes)
     {
         Console.Write("Bytes:");
@@ -345,21 +374,23 @@ public class Argon
         byte[] fileBytes = File.ReadAllBytes(fileName);
         List<byte> register = new();
         byte count = 0;
+        byte ignoreCount = 0;
         Processor current = null;
         foreach (byte fileByte in fileBytes)
         {
             // Console.WriteLine(fileByte);
-            if (fileByte < CommandMap.Count)
+            if (ignoreCount < 0) throw new Exception("Negative Ignore Count");
+            if (fileByte < CommandMap.Count && ignoreCount == 0)
             {
                 Processor x = CommandMap[fileByte]();
                 if (x.isEmpty)
                 {
-                    current.callback(count, register.ToArray());
+                    ignoreCount = current.callback(count, register.ToArray());
                     register.Clear();
                     switch (fileByte)
                     {
                         case 0:
-                            // Next
+                            // End
                             count = 0;
                             break;
                         case 1:
@@ -375,19 +406,27 @@ public class Argon
                 }
             } else
             {
+                if (ignoreCount > 0) ignoreCount--;
                 register.Add(fileByte);
             }
         }
         foreach (Table table in Tables)
         {
-            PrintTable(table, 16);
+            PrintTable(table, null);
         }
     }
 
+    public const string Version = "Alpha";
+
     public static void Main(string[] args)
     {
-        Console.WriteLine("ARGON DATABASE!");
-        Console.WriteLine($"Characters: {InitCharacters()}");
+        Console.ForegroundColor = ConsoleColor.Blue;
+        Console.WriteLine("      ___           ___           ___           ___           ___     \n     /\\  \\         /\\  \\         /\\  \\         /\\  \\         /\\__\\    \n    /::\\  \\       /::\\  \\       /::\\  \\       /::\\  \\       /::|  |   \n   /:/\\:\\  \\     /:/\\:\\  \\     /:/\\:\\  \\     /:/\\:\\  \\     /:|:|  |   \n  /::\\~\\:\\  \\   /::\\~\\:\\  \\   /:/  \\:\\  \\   /:/  \\:\\  \\   /:/|:|  |__ \n /:/\\:\\ \\:\\__\\ /:/\\:\\ \\:\\__\\ /:/__/_\\:\\__\\ /:/__/ \\:\\__\\ /:/ |:| /\\__\\\n \\/__\\:\\/:/  / \\/_|::\\/:/  / \\:\\  /\\ \\/__/ \\:\\  \\ /:/  / \\/__|:|/:/  /\n      \\::/  /     |:|::/  /   \\:\\ \\:\\__\\    \\:\\  /:/  /      |:/:/  / \n      /:/  /      |:|\\/__/     \\:\\/:/  /     \\:\\/:/  /       |::/  /  \n     /:/  /       |:|  |        \\::/  /       \\::/  /        /:/  /   \n     \\/__/         \\|__|         \\/__/         \\/__/         \\/__/    \n");
+        Console.ResetColor();
+        Console.WriteLine($"Version: {Version}");
+        Console.WriteLine($" + Commands: {CommandMap.Count}");
+        Console.WriteLine($" + Characters: {InitCharacters()}");
+        Console.WriteLine();
         if (args.Length == 1)
         {
             FileInfo file = new(args[0]);
